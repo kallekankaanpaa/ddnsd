@@ -4,9 +4,10 @@ use std::time;
 
 mod config;
 mod utils;
+mod windows;
 
-fn main() -> anyhow::Result<()> {
-    simple_logger::init_with_level(log::Level::Info).unwrap();
+fn maini() -> anyhow::Result<()> {
+    //simple_logger::init_with_level(log::Level::Info).unwrap();
 
     let config = config::init_config()?;
     let agent = ureq::builder().user_agent(utils::APP_USER_AGENT).build();
@@ -41,4 +42,29 @@ fn main() -> anyhow::Result<()> {
 
         thread::sleep(time::Duration::from_secs(config.ip_checker.interval));
     }
+}
+
+#[cfg(target_family = "unix")]
+fn main() -> std::process::ExitCode {
+    std::process::ExitCode::SUCCESS;
+}
+
+#[cfg(target_family = "windows")]
+pub const SERVICE_NAME: &str = include_str!(r"..\service_name.in");
+
+#[cfg(target_family = "windows")]
+use windows::ddns_service_main;
+#[cfg(target_family = "windows")]
+windows_service::define_windows_service!(ffi_service_main, ddns_service_main);
+
+#[cfg(target_family = "windows")]
+fn main() -> windows_service::Result<()> {
+    use windows_event_log::{EventLog, EventLogKey};
+    let event_log = EventLog::new(EventLogKey::default(), SERVICE_NAME, log::Level::Info);
+    event_log
+        .set_message_file_location()
+        .unwrap()
+        .register()
+        .unwrap();
+    windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main)
 }
