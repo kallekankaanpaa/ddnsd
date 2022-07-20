@@ -1,15 +1,50 @@
-use crate::{config, utils};
-use std::{convert::AsRef, net::Ipv4Addr, str::FromStr};
+use crate::{
+    config::{self, CONFIG},
+    utils,
+};
+use once_cell::sync::OnceCell;
+use reqwest::Client;
+use std::{convert::AsRef, convert::From, net::Ipv4Addr};
 
-pub static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
+pub const APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
-pub static IP_CHECK_ADDRESS: &str = "https://ident.me";
+pub const IP_CHECK_ADDRESS: &str = "https://ident.me";
 
-pub static DDNS_ADDRESS: &str = "https://dy.fi/nic/update";
+pub const DDNS_ADDRESS: &str = "https://dy.fi/nic/update";
+
+pub static CLIENT: OnceCell<Client> = OnceCell::new();
+
+pub fn init_http_client() {
+    let client = Client::builder()
+        .https_only(true)
+        .user_agent(APP_USER_AGENT)
+        .build()
+        .unwrap();
+    CLIENT.set(client).unwrap();
+}
 
 pub fn basic_auth<T: AsRef<str>>(user: T, password: T) -> String {
     let encoded = base64::encode(format!("{}:{}", user.as_ref(), password.as_ref()));
     format!("Basic {}", encoded)
+}
+
+pub async fn check_ip() -> anyhow::Result<Ipv4Addr> {
+    let client = CLIENT
+        .get()
+        .expect("http client needs to be initalized first");
+    let config = CONFIG
+        .get()
+        .expect("configuration needds to be initalized first");
+    let response = client
+        .get(utils::IP_CHECK_ADDRESS)
+        .header("Connection", "Keep-Alive")
+        .header(
+            "Keep-Alive",
+            &format!("timeout={}, max=1000", config.ip_checker.interval + 5),
+        )
+        .send()
+        .await?;
+    Ok(response.text().await?.parse()?)
 }
 
 pub fn get_ip(agent: &ureq::Agent, config: &config::Config) -> anyhow::Result<Ipv4Addr> {
@@ -34,7 +69,7 @@ pub fn update_ddns(agent: &ureq::Agent, config: &config::Config) -> anyhow::Resu
         )
         .call()?
         .into_string()?;
-    Ok(response.parse()?)
+    Ok(response.into())
 }
 
 #[derive(Debug, PartialEq)]
@@ -49,34 +84,26 @@ pub enum DdnsStatus {
     Abuse,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum DdnsError {
-    #[error("dy.fi returned invalid IP")]
-    InvalidIp(#[from] std::net::AddrParseError),
-    #[error("invalid response: '{0}'")]
-    InvalidResponse(String),
-}
-
-impl FromStr for DdnsStatus {
-    type Err = DdnsError;
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
-            "badauth" => Ok(DdnsStatus::BadAuth),
-            "nohost" => Ok(DdnsStatus::NoHost),
-            "notfqdn" => Ok(DdnsStatus::NotFqdn),
-            "nochg" => Ok(DdnsStatus::NoChg),
-            "dnserr" => Ok(DdnsStatus::DnsErr),
-            "abuse" => Ok(DdnsStatus::Abuse),
+impl<T: AsRef<str>> From<T> for DdnsStatus {
+    fn from(response: T) -> Self {
+        let response_ref = response.as_ref();
+        match response_ref {
+            "badauth" => DdnsStatus::BadAuth,
+            "nohost" => DdnsStatus::NoHost,
+            "notfqdn" => DdnsStatus::NotFqdn,
+            "nochg" => DdnsStatus::NoChg,
+            "dnserr" => DdnsStatus::DnsErr,
+            "abuse" => DdnsStatus::Abuse,
             _ => {
                 // Manually check badip and good since they provide ip addresses
-                if input.starts_with("badip") {
-                    let ip: Ipv4Addr = input[7..].parse().map_err(DdnsError::InvalidIp)?;
-                    Ok(DdnsStatus::BadIp(ip))
-                } else if input.starts_with("good") {
-                    let ip: Ipv4Addr = input[6..].parse().map_err(DdnsError::InvalidIp)?;
-                    Ok(DdnsStatus::Good(ip))
+                if response_ref.starts_with("badip") {
+                    let ip: Ipv4Addr = response_ref[7..].parse().unwrap();
+                    DdnsStatus::BadIp(ip)
+                } else if response_ref.starts_with("good") {
+                    let ip: Ipv4Addr = response_ref[6..].parse().unwrap();
+                    DdnsStatus::Good(ip)
                 } else {
-                    Err(DdnsError::InvalidResponse(input.to_string()))
+                    panic!("Invalid return value from dy")
                 }
             }
         }

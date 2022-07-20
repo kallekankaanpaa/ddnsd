@@ -1,6 +1,9 @@
+use once_cell::sync::OnceCell;
 use std::{fs, io::Write, path::Path};
 
 use serde::{Deserialize, Serialize};
+
+pub static CONFIG: OnceCell<Config> = OnceCell::new();
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Ddns {
